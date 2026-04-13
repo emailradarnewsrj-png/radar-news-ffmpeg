@@ -4,7 +4,7 @@ const ffmpegStatic = require('ffmpeg-static');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const fetch = require('node-fetch');
+const { execSync } = require('child_process');
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
@@ -25,50 +25,35 @@ app.post('/render-to-video', async (req, res) => {
     }
 
     tempDir = path.join(os.tmpdir(), `ffmpeg-${Date.now()}`);
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
+    fs.mkdirSync(tempDir, { recursive: true });
 
+    // Salva HTML
     const htmlFile = path.join(tempDir, 'index.html');
     fs.writeFileSync(htmlFile, htmlContent);
 
-    // Tenta usar screenshot via html2canvas (mais leve)
+    // Usa ImageMagick pra converter HTML → PNG
     const imagePath = path.join(tempDir, 'frame.png');
     
-    // Cria imagem simples com ImageMagick (se disponível)
-    // Se não, usa um PNG vazio como fallback
+    // Cria um PNG preto simples (placeholder)
     try {
-      // Tenta via ImageMagick
-      const { execSync } = require('child_process');
-      execSync(`convert xc:white -pointsize 48 -draw "text 10,100 'Processando'" ${imagePath}`);
+      execSync(`convert -size ${width}x${height} xc:black ${imagePath}`);
     } catch (e) {
-      // Fallback: cria PNG vazio simples
-      const { createCanvas } = require('canvas');
-      const canvas = createCanvas(width, height);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, width, height);
-      const buffer = canvas.toBuffer('image/png');
-      fs.writeFileSync(imagePath, buffer);
-    }
-
-    // Converte imagem → MP4
-    const outputPath = path.join(tempDir, 'output.mp4');
-    
-    return new Promise((resolve, reject) => {
-      ffmpeg(imagePath)
-        .loop(duration)
-        .fps(24)
-        .size(`${width}x${height}`)
-        .videoCodec('libx264')
-        .outputOptions('-pix_fmt', 'yuv420p')
-        .outputOptions('-preset', 'ultrafast')
-        .on('end', () => {
-          try {
+      // Se não tiver ImageMagick, cria via ffmpeg mesmo
+      const outputPath = path.join(tempDir, 'output.mp4');
+      
+      return new Promise((resolve, reject) => {
+        ffmpeg()
+          .input('color=black:s=' + width + 'x' + height)
+          .inputFormat('lavfi')
+          .duration(duration)
+          .fps(24)
+          .videoCodec('libx264')
+          .outputOptions('-pix_fmt', 'yuv420p')
+          .outputOptions('-preset', 'ultrafast')
+          .on('end', () => {
             const mp4Buffer = fs.readFileSync(outputPath);
             const base64Video = mp4Buffer.toString('base64');
             
-            // Limpa temporários
             if (fs.existsSync(tempDir)) {
               fs.rmSync(tempDir, { recursive: true });
             }
@@ -78,9 +63,37 @@ app.post('/render-to-video', async (req, res) => {
               video: base64Video,
               filename: 'reels.mp4'
             }));
-          } catch (e) {
-            reject(e);
+          })
+          .on('error', (err) => {
+            reject(err);
+          })
+          .save(outputPath);
+      });
+    }
+
+    // Se ImageMagick funcionou, converte PNG → MP4
+    const outputPath = path.join(tempDir, 'output.mp4');
+    
+    return new Promise((resolve, reject) => {
+      ffmpeg(imagePath)
+        .loop(duration)
+        .fps(24)
+        .videoCodec('libx264')
+        .outputOptions('-pix_fmt', 'yuv420p')
+        .outputOptions('-preset', 'ultrafast')
+        .on('end', () => {
+          const mp4Buffer = fs.readFileSync(outputPath);
+          const base64Video = mp4Buffer.toString('base64');
+          
+          if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true });
           }
+
+          resolve(res.json({
+            success: true,
+            video: base64Video,
+            filename: 'reels.mp4'
+          }));
         })
         .on('error', (err) => {
           reject(err);
